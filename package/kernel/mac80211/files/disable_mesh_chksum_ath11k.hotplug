@@ -8,7 +8,7 @@ UEVENT="/sys/class/net/$INTERFACE/device/uevent"
 
 DRIVER=$(awk -F= '/^DRIVER/{print $2}' "$UEVENT")
 case "$DRIVER" in
-  *ath11k*)
+  *ath11k*|*ath10k*)
     mode=$(ubus call network.wireless status \
       | jsonfilter -e "@[*].interfaces[@.ifname='$INTERFACE'].config.mode" 2> /dev/null)
     [ "$mode" = "mesh" ] || exit 0
