@@ -1,0 +1,5 @@
+#!/bin/sh
+# ecm-accel-delay (accel_delay_pkts=24) is in the image; sysupgrade does not keep the
+# /etc/rc.d link, so enable it on the first boot (2026-10-22).
+[ -x /etc/init.d/ecm-accel-delay ] && /etc/init.d/ecm-accel-delay enable
+exit 0

@@ -1,0 +1,28 @@
+#!/bin/sh /etc/rc.common
+# Set ECM accel_delay_pkts after qca-nss-ecm (START=26) has loaded the module.
+# The ECM init writes 1 on every module load; see custom/README.md.
+
+START=27
+USE_PROCD=1
+
+VALUE=24
+FILE=/sys/kernel/debug/ecm/ecm_classifier_default/accel_delay_pkts
+
+apply() {
+	local i=0
+	while [ ! -w "$FILE" ] && [ "$i" -lt 30 ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+	[ -w "$FILE" ] || { logger -t ecm-accel-delay "ECM not loaded; not set"; return 1; }
+	echo "$VALUE" > "$FILE"
+	logger -t ecm-accel-delay "accel_delay_pkts=$(cat "$FILE")"
+}
+
+start_service() {
+	apply
+}
+
+reload_service() {
+	apply
+}

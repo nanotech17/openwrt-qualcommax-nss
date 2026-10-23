@@ -1,0 +1,25 @@
+Subject: [PATCH] tunipip6: release the route in the encap exception path
+
+nss_tunipip6_encap_exception() looks up an IPv4 route for every exception
+packet, but when the route does not point to the tunnel (decap direction)
+the packet is handed to netif_receive_skb() without ip_rt_put(), leaking a
+dst reference per packet.  Leaked dsts can never be freed once the route
+cache entry is replaced, so ip_dst_cache grows (SUnreclaim leak).
+
+---
+--- a/tunipip6/nss_connmgr_tunipip6.c
++++ b/tunipip6/nss_connmgr_tunipip6.c
+@@ -198,6 +198,13 @@
+ 		skb->pkt_type = PACKET_HOST;
+ 		skb->skb_iif = dev->ifindex;
+ 		skb->ip_summed = CHECKSUM_NONE;
++
++		/*
++		 * The route was only used to choose the direction; release it,
++		 * or every packet taking this path leaks a dst reference
++		 * (IPv4 dst entries pile up in ip_dst_cache).
++		 */
++		ip_rt_put(rt);
+ 		netif_receive_skb(skb);
+ 		return;
+ 	}
