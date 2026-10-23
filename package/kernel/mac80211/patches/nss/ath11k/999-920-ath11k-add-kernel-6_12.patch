@@ -121,7 +121,7 @@
  {
  	struct arvif_nss *nss;
  
-@@ -4624,7 +4624,7 @@ void ath11k_nss_peer_stats_enable(struct
+@@ -4627,7 +4627,7 @@ void ath11k_nss_peer_stats_enable(struct
  			     ATH11K_NSS_STATS_ENABLE);
  }
  
@@ -130,7 +130,7 @@
  {
  	struct ath11k *ar = ab->pdevs[radio_id].ar;
  	struct nss_wifili_pdev_init_msg *pdevmsg;
-@@ -4759,7 +4759,7 @@ dealloc:
+@@ -4762,7 +4762,7 @@ dealloc:
  /* TODO : Check if start, reset and stop messages can be done using single function as
   * body is similar, having it now for clarity */
  
@@ -139,7 +139,7 @@
  {
  	struct nss_wifili_msg *wlmsg = NULL;
  	nss_wifili_msg_callback_t msg_cb;
-@@ -4924,7 +4924,7 @@ free:
+@@ -4927,7 +4927,7 @@ free:
  	return ret;
  }
  

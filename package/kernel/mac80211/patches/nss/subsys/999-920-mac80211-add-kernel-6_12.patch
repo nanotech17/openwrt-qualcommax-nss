@@ -29,3 +29,16 @@
  			    struct net_device *dev, struct sta_info *sta,
  			    struct ieee80211_key *key, struct sk_buff *skb,
  			    u32 info_flags, u32 ctrl_flags, u64 *cookie)
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -2798,8 +2798,8 @@ static int copy_mesh_setup(struct ieee80
+ 		ifmsh->security |= IEEE80211_MESH_SEC_SECURED;
+ 
+ 	/* mcast rate setting in Mesh Node */
+-	memcpy(sdata->vif.bss_conf.mcast_rate, setup->mcast_rate,
+-						sizeof(setup->mcast_rate));
++	for (i = 0; i < NUM_NL80211_BANDS; i++)
++		sdata->vif.bss_conf.mcast_rate[i] = setup->mcast_rate[i];
+ 	sdata->vif.bss_conf.basic_rates = setup->basic_rates;
+ 
+ 	sdata->vif.bss_conf.beacon_int = setup->beacon_interval;
