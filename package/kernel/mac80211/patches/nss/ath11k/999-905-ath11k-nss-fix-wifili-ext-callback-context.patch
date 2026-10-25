@@ -1,0 +1,46 @@
+From: nanotech17 <346107436+nanotech17@users.noreply.github.com>
+Subject: [PATCH] ath11k: nss: fix wifili ext callback context
+
+nss_register_wifili_if() is given the ath11k_base pointer itself as its
+net_device argument, and qca-nss-drv hands that same pointer back as the
+first argument of the ext callback (nss_core.c: ext_cb(ndev, nbuf, napi)).
+The wrapper added by 999-904 ran netdev_priv() on it, so the callback got
+an ath11k_base pointer offset past the real one. Debug prints showed a
+garbage device name, and a MIC error exception would take
+ab->base_lock and walk ab->pdevs[] at that bogus address.
+
+Use the pointer as is. Also log the transmitter of INVALID_PEER
+exceptions (rate limited, NSS debug mask) to see where they come from.
+
+--- a/drivers/net/wireless/ath/ath11k/nss.c
++++ b/drivers/net/wireless/ath/ath11k/nss.c
+@@ -512,6 +512,18 @@ ath11k_nss_wifili_ext_callback_fn(struct
+ 	case NSS_WIFILI_SOC_EXT_DATA_PKT_MIC_ERROR:
+ 		ath11k_nss_process_mic_error(ab, skb);
+ 		break;
++	case NSS_WIFILI_SOC_EXT_DATA_PKT_INVALID_PEER: {
++		struct hal_rx_desc *desc = (struct hal_rx_desc *)skb->data;
++
++		if (skb->len >= ab->hw_params.hal_desc_sz &&
++		    ab->hw_params.hw_ops->rx_desc_mac_addr2_valid(desc) && net_ratelimit())
++			ath11k_dbg(ab, ATH11K_DBG_NSS,
++				   "wifili ext cb invalid peer: addr2 %pM peer_id %u len %u\n",
++				   ab->hw_params.hw_ops->rx_desc_mpdu_start_addr2(desc),
++				   ath11k_dp_rx_h_mpdu_start_peer_id(ab, desc), skb->len);
++		dev_kfree_skb_any(skb);
++		break;
++	}
+ 	default:
+ 		ath11k_dbg(ab, ATH11K_DBG_NSS, "unknown packet type received in wifili ext cb %d",
+ 			    wepm->pkt_type);
+@@ -524,8 +536,8 @@ static inline void ath11k_nss_wifili_ext
+ 						   struct sk_buff *skb,
+ 						   struct napi_struct *napi)
+ {
+-	// Retrieve the ath11k_base from the net_device's private data
+-	struct ath11k_base *ab = (struct ath11k_base *)netdev_priv(netdev);
++	/* nss_register_wifili_if() was given ab itself as the net_device */
++	struct ath11k_base *ab = (struct ath11k_base *)netdev;
+
+ 	// Call the original function with the retrieved ath11k_base
+ 	ath11k_nss_wifili_ext_callback_fn(ab, skb, napi);
