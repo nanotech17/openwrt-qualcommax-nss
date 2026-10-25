@@ -19,6 +19,13 @@ MX4200v1.
   `custom/feeds.conf`.
 - Images: see the Releases page of this repository.
 
+> **Update from r1.** The r1 images (`custom-v25.12.6-nss-r1`) have a bug in
+> 802.11s mesh with NSS: after a mesh node receives a certain fragmented
+> broadcast, NSS stops passing broadcast and multicast frames from the mesh to
+> the host, and the node later becomes unreachable (fix 6 below). Use r2
+> (`custom-v25.12.6-nss-r2`) or later on any device that uses mesh. r2 also
+> fixes two wrong pointers in the NSS Wi-Fi callbacks (fix 7).
+
 ## Contents
 
 | Path | What |
@@ -48,6 +55,8 @@ MX4200v1.
 | 3 | qca-nss-clients tunipip6: release the route in the encap exception path | `custom/patches/nss_packages/` (applied to the nss_packages feed) | both |
 | 4 | Set ECM `accel_delay_pkts` to 24 at boot | `custom/files/mx5300/` | MX5300 only |
 | 5 | One device per config, package selection | `custom/configs/<device>.config` | per device |
+| 6 | ath11k NSS: revert `999-233` "Disable rx_header tlv for 2K SKB" (mesh broadcast loss) | `package/kernel/mac80211/patches/nss/ath11k/999-904-Revert-233-...` (since r2) | both |
+| 7 | ath11k NSS: fix the context pointer of the wifili ext and event callbacks | `999-905-...`, `999-995-...` in the same directory (since r2) | both |
 
 ### 1. ath11k NSS mesh "mpath not found" exceptions
 
@@ -121,6 +130,58 @@ Both configs set `CONFIG_KERNEL_BUILD_USER="builder"` and
 `CONFIG_KERNEL_BUILD_DOMAIN="buildhost"`, and leave the `nss_packages` and
 `sqm_scripts_nss` feeds out of `distfeeds.conf`.
 
+### 6. Mesh broadcast loss (revert of `999-233`)
+
+Symptom (r1): on a mesh node, broadcast and multicast frames from the mesh
+stop reaching the host, while the mesh peer stays `ESTAB` and unicast keeps
+working for a while. ARP, DHCP, IPv6 neighbor discovery and mDNS from the mesh
+side fail, so the node and the clients behind it lose the network. NSS keeps
+the frames instead of handing them to the host (`n2h_n2h_tot_payloads` in the
+NSS stats grows by about 10 per second and `drv_rx_buffers_ext_pkt` stops).
+After about 25 minutes the NSS buffer pool is used up and the WLAN firmware
+stops answering WMI commands (`failed to request fw stats: -110`,
+`ce desc not available for wmi command`). Only a reboot recovers.
+
+Trigger: a UDP broadcast that is split into two IP fragments, where the second
+fragment is about 1372-1388 bytes long (UDP payload of about 2761-2887 bytes at
+MTU 1500; the exact limits were not measured). One such frame from the mesh is
+enough. In practice the sender was `usteer` (UDP port 16720), whose remote
+updates grow with the number of nodes and clients and are sent as a single
+datagram.
+
+Cause: the NSS patch `999-233-ath11k-Disable-rx_header-tlv-for-2K-SKB`, which
+is active with `CONFIG_ATH11K_MEM_PROFILE_512M=y` (both devices). With NSS it
+makes the RX buffers smaller (1816 bytes) and stops requesting the
+`rx_pkt_header` TLV. With it reverted, the trigger did not cause the problem.
+The AgustinLorenzo/openwrt builds also revert `999-233`, and the problem was
+not seen with them.
+
+The fix reverts `999-233` (`999-904-Revert-233-...`). The cost is the memory
+the patch saved for the RX buffers; no lack of memory was seen in the tests.
+
+A change to `usteer` that splits its updates into datagrams of up to 1200
+bytes ([openwrt/usteer#25](https://github.com/openwrt/usteer/pull/25), not
+merged as of this writing) would also avoid this trigger on the sending side,
+but not the cause.
+
+### 7. wifili callback context
+
+Two pointer mix-ups in the ath11k NSS code, found while debugging fix 6. They
+were not the cause of the broadcast loss.
+
+- `999-905`: the wifili ext callback received the `ath11k_base` pointer offset
+  by `netdev_priv()`. A MIC error exception would have taken a lock and walked
+  the radios at that wrong address. The patch uses the pointer as is. It also
+  adds a rate-limited debug message (NSS debug mask only) for `INVALID_PEER`
+  exceptions.
+- `999-995`: NSS calls the wifili event callback with the pointer registered
+  for the interface the message came from: `ath11k_base` for the SoC, but
+  `ath11k` for each radio. Events from a radio were handled as if the pointer
+  were an `ath11k_base`, about once a second (peer stats, under
+  `ab->base_lock`). With the NSS debug messages on, this caused an oops on the
+  MX4200v1. The patch maps the pointer back to its `ath11k_base` and drops
+  events from unknown pointers.
+
 ## Testing
 
 Tested on one MX5300 and one MX4200v1, with a Linksys E8450 (OpenWrt 25.12.5) as
@@ -138,6 +199,44 @@ the mesh peer and Linux hosts on the LAN and WAN sides (1 GbE).
 The mesh throughput is limited by the E8450 as the iperf3 endpoint. The results
 were the same as with the previous build of these devices
 (AgustinLorenzo/openwrt based, kernel 6.12.94) in the same setup.
+
+### r2 (fixes 6 and 7)
+
+Broadcast loss (fix 6). A Linux host sent a UDP broadcast with 2840 bytes of
+payload (second fragment 1388 bytes) once a second over the LAN of an MX5300
+gateway, which forwarded it over the mesh (ath11k, 5 GHz ch 60, HE80) to the
+node under test.
+
+| Image on the node under test | Result |
+|---|---|
+| r1 on an MX4200v1 | broadcast loss 3 of 3 times, within 1 minute after the mesh peer came up |
+| r1 with debug changes (`999-233` present) on an MX4200v1 | 3 of 3 times, same |
+| r1 with debug changes, `999-233` reverted, on an MX4200v1 | no loss in 60 minutes (about 900 triggers in the first 15 minutes) |
+| r2 on an MX4200v1 | no loss, 2 × 60 minutes (sysupgrade and reboot, about 3600 triggers each) |
+| r2 on an MX5300 (mesh node) | no loss, 10 minutes (595 triggers) |
+
+Before the trigger was known, the loss happened on its own several times a day
+with r1 and with the debug builds that contain `999-233`. Each time it was
+checked (4 times), such a frame from `usteer` had arrived just before. With
+`999-233` reverted, 4 of 4 one-hour runs without the injected trigger had no
+loss.
+
+The r1 tests above were repeated on the MX5300 with r2 (USB 3 NIC on the LAN
+side; same setup otherwise):
+
+| Test | MX5300 r2 |
+|---|---|
+| DS-Lite (B4), TCP 1/4 streams | up 890 Mbps, down 915 Mbps, CPU about 0% |
+| DS-Lite, UDP 900 Mbit/s | down 899 Mbps (0.08% loss); up 745 Mbps without loss |
+| 802.11s mesh over ath11k (ch 36, HE80) | up 888-893 Mbps, down 597-713 Mbps, CPU 0-1% |
+| 802.11s mesh over ath10k (ch 120, VHT80) | up 694 Mbps, down 527 Mbps |
+| Mesh path deleted under load (fix 1) | no bogus paths, NSS path table not full |
+| Mesh path deleted every 20 s under load, 5 minutes | no reset, no bogus paths, free memory stable |
+| Recovery after deleting the mesh path once | about 58 s |
+
+The UDP upload stays below 900 Mbit/s with the sending host used here. The r2
+MX5300 has also been running as the gateway of a home network (DS-Lite,
+`adblock`, `tailscale`, mesh to an MX4200v1) since 2026-10-25.
 
 ## Known issues
 
@@ -158,8 +257,8 @@ were the same as with the previous build of these devices
   `gcc_usb1_master_clk status stuck at 'on'` with a `WARNING` from
   `clk-branch.c:87`. The previous build shows the same. No effect was seen.
 - **Mesh path recovery.** After a mesh path is deleted by hand under load, it
-  took about 35 seconds to come back in this test setup. The previous build
-  behaved the same in the same setup.
+  took about 35 seconds to come back in this test setup (about 58 seconds in
+  the r2 test). The previous build behaved the same in the same setup.
 
 ## Building
 
