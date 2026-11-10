@@ -57,6 +57,7 @@ MX4200v1.
 | 5 | One device per config, package selection | `custom/configs/<device>.config` | per device |
 | 6 | ath11k NSS: revert `999-233` "Disable rx_header tlv for 2K SKB" (mesh broadcast loss) | `package/kernel/mac80211/patches/nss/ath11k/999-904-Revert-233-...` (since r2) | both |
 | 7 | ath11k NSS: fix the context pointer of the wifili ext and event callbacks | `999-905-...`, `999-995-...` in the same directory (since r2) | both |
+| 8 | mac80211 mesh: send unicast for an unknown station to all peers (first-frame loss to idle stations) | `package/kernel/mac80211/patches/nss/subsys/999-930-...` | both |
 
 ### 1. ath11k NSS mesh "mpath not found" exceptions
 
@@ -181,6 +182,57 @@ were not the cause of the broadcast loss.
   `ab->base_lock`). With the NSS debug messages on, this caused an oops on the
   MX4200v1. The patch maps the pointer back to its `ath11k_base` and drops
   events from unknown pointers.
+
+### 8. First frames to an idle station behind another node
+
+Symptom: with `mesh_fwding 0`, a host that starts talking to a host behind
+another mesh node after about 10 minutes of silence gets no answer for several
+seconds; after that, traffic is normal. A Linux host with a stale ARP entry
+waits about 8.5 seconds (5 s DELAY and 3 unicast probes, then a broadcast ARP
+request). Mesh nodes themselves are affected the same way, for example SSH from
+one node to the LAN address of another.
+
+Cause: mac80211 forgets a proxied station (mpp entry) 600 seconds after it was
+last used. A unicast frame for a station with no mpp entry is addressed to the
+station's own MAC address as the mesh destination, and HWMP path discovery is
+started for it. No mesh node answers a PREQ on behalf of a station behind it,
+so the PREQs time out after about 3 seconds and, with no mesh gate, the queued
+frames are dropped (`dropped_frames_no_route` grows). Only a broadcast (the ARP
+request) gets through and teaches the nodes the mpp entry again. Upstream
+mac80211 behaves the same; the NSS patches do not change this.
+
+The fix (`999-930`) applies only when `dot11MeshForwarding` is off, where
+every mesh node is a peer. If the destination is neither a peer nor has an mpp
+entry, `mesh_nexthop_resolve()` sends a copy of the frame to every established
+peer instead of starting path discovery, addressed to that peer with the real
+destination in the 6-address extension, the same way frames are handed to
+mesh gates. The node that has the station bridges the frame to it, and the
+reply creates the mpp entry, so later frames go to one peer only. If no copy
+can be made, path discovery runs as before. The cost is that frames for an
+unknown station are copied to all peers and flooded on their LANs until the
+station answers, like unknown unicast on a bridge.
+
+The first version of this patch prepared the queue for the copies with
+`__skb_queue_head_init()`, which leaves the queue lock uninitialized, and
+`ieee80211_add_pending_skbs()` takes that lock. Both test nodes reset the
+first time the path was used (oops in `queued_spin_lock_slowpath` under
+`mesh_path_send_to_peers`, captured with ramoops). The committed version uses
+`skb_queue_head_init()`.
+
+Tests (two MX5300, plus a Linksys E8450 with OpenWrt 25.12.5 as a third,
+unpatched peer; mesh on ch 36, HE80, SAE, `mesh_fwding 0`):
+
+| Test | Without the patch | With the patch |
+|---|---|---|
+| Ping to a host behind another node after 11 minutes of silence | first reply after about 9 s, 9 of 15 lost, `dropped_frames_no_route` +12 | first reply to the first ping, none lost |
+| SSH from one node to another node's LAN address after 11 minutes | stalled about 12 s | about 0.9 s |
+| Unicast to a MAC no node knows, 5 minutes (about 27,800 frames through the new path, 1 and 2 peers) | - | no reset, no kernel warnings, each copy delivered once |
+| Same idle test with 2 peers (copy path) | - | first reply to the first ping, no duplicates |
+
+On the home network (two MX4200v1 and one SXR80), a ping from a host behind
+one MX4200v1 to an idle host behind the other, after 11 minutes of silence,
+got its first reply to the first ping (before: after about 8.5 s, 41 pings
+lost).
 
 ## Testing
 
